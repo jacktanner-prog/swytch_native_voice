@@ -1,0 +1,22 @@
+name: swytch_native_voice
+description: Isolated native Twilio Voice bridge for Swytch Mobile.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  plugin_platform_interface: ^2.1.8
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.swytchhub.nativevoice
+        pluginClass: SwytchNativeVoicePlugin
+      ios:
+        pluginClass: SwytchNativeVoicePlugin
