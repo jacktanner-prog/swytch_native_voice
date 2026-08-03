@@ -267,6 +267,24 @@ extension SwytchNativeVoicePlugin: PKPushRegistryDelegate {
 
 extension SwytchNativeVoicePlugin: NotificationDelegate {
   public func callInviteReceived(callInvite: CallInvite) {
+    if activeCall != nil {
+      callInvite.reject()
+      emit(
+        type: "incomingBusy",
+        state: "connected",
+        message: "Another incoming call was declined while your current call continues."
+      )
+      return
+    }
+    if self.callInvite != nil {
+      callInvite.reject()
+      emit(
+        type: "incomingBusy",
+        state: "incoming",
+        message: "Another incoming call was declined."
+      )
+      return
+    }
     self.callInvite = callInvite
     activeCallSid = callInvite.callSid
     UserDefaults.standard.set(Date(), forKey: Self.bindingDateKey)
