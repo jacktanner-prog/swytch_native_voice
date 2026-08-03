@@ -85,13 +85,27 @@ public final class SwytchVoiceService extends Service {
         if (intent == null || intent.getAction() == null) return START_NOT_STICKY;
 
         switch (intent.getAction()) {
-            case ACTION_INCOMING:
-                pendingInvite = intent.getParcelableExtra(EXTRA_CALL_INVITE);
+            case ACTION_INCOMING: {
+                CallInvite incomingInvite = intent.getParcelableExtra(EXTRA_CALL_INVITE);
+                if (incomingInvite != null && (activeCall != null || pendingInvite != null)) {
+                    incomingInvite.reject(this);
+                    if (activeCall != null) {
+                        updateState("incomingBusy", "connected",
+                                "Another incoming call was declined while your current call continues.");
+                        startForegroundCompat(buildActiveNotification("Active call"), true);
+                    } else {
+                        updateState("incomingBusy", "incoming",
+                                "Another incoming call was declined.");
+                    }
+                    break;
+                }
+                pendingInvite = incomingInvite;
                 if (pendingInvite != null) {
                     updateState("incoming", "incoming", null);
                     showIncomingNotification();
                 }
                 break;
+            }
             case ACTION_CANCELLED:
                 CancelledCallInvite cancelled = intent.getParcelableExtra(EXTRA_CANCELLED_INVITE);
                 if (cancelled != null && pendingInvite != null
@@ -99,8 +113,10 @@ public final class SwytchVoiceService extends Service {
                     pendingInvite = null;
                     updateState("cancelled", "disconnected", null);
                     stopVoiceService();
-                } else {
+                } else if (activeCall == null) {
                     stopVoiceService();
+                } else {
+                    updateState("state", "connected", null);
                 }
                 break;
             case ACTION_CALL:
