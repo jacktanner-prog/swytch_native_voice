@@ -314,7 +314,7 @@ extension SwytchNativeVoicePlugin: CXProviderDelegate {
     }
     provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: Date())
     let options = ConnectOptions(accessToken: token) { builder in
-      var parameters = pendingOutgoingParameters
+      var parameters = self.pendingOutgoingParameters
       parameters["To"] = to
       builder.params = parameters
       builder.uuid = action.callUUID
