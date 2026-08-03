@@ -19,6 +19,7 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
   private var deviceToken: Data?
   private var callInvite: CallInvite?
   private var activeCall: Call?
+  private var activeCallSid: String?
   private var pendingOutgoingToken: String?
   private var pendingOutgoingTo: String?
   private var pendingOutgoingParameters: [String: String] = [:]
@@ -219,7 +220,9 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
       "muted": muted,
       "onHold": onHold,
     ]
-    if let sid = callInvite?.callSid { payload["callSid"] = sid }
+    if let sid = activeCall?.callSid ?? activeCallSid ?? callInvite?.callSid {
+      payload["callSid"] = sid
+    }
     if let from = callInvite?.from { payload["from"] = from.replacingOccurrences(of: "client:", with: "") }
     if let to = pendingOutgoingTo { payload["to"] = to }
     return payload
@@ -265,6 +268,7 @@ extension SwytchNativeVoicePlugin: PKPushRegistryDelegate {
 extension SwytchNativeVoicePlugin: NotificationDelegate {
   public func callInviteReceived(callInvite: CallInvite) {
     self.callInvite = callInvite
+    activeCallSid = callInvite.callSid
     UserDefaults.standard.set(Date(), forKey: Self.bindingDateKey)
 
     let from = (callInvite.from ?? "Swytch caller").replacingOccurrences(of: "client:", with: "")
@@ -297,6 +301,7 @@ extension SwytchNativeVoicePlugin: CXProviderDelegate {
     audioDevice.isEnabled = false
     callInvite = nil
     activeCall = nil
+    activeCallSid = nil
     emit(type: "reset", state: "idle")
   }
 
@@ -326,6 +331,7 @@ extension SwytchNativeVoicePlugin: CXProviderDelegate {
 
   public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
     guard let invite = callInvite else { action.fail(); return }
+    activeCallSid = invite.callSid
     let options = AcceptOptions(callInvite: invite) { builder in builder.uuid = invite.uuid }
     activeCall = invite.accept(options: options, delegate: self)
     callInvite = nil
@@ -368,10 +374,12 @@ extension SwytchNativeVoicePlugin: CXProviderDelegate {
 
 extension SwytchNativeVoicePlugin: CallDelegate {
   public func callDidStartRinging(call: Call) {
+    activeCallSid = call.callSid
     emit(type: "ringing", state: "ringing")
   }
 
   public func callDidConnect(call: Call) {
+    activeCallSid = call.callSid
     if let uuid = call.uuid { provider.reportOutgoingCall(with: uuid, connectedAt: Date()) }
     emit(type: "connected", state: "connected")
   }
@@ -388,6 +396,7 @@ extension SwytchNativeVoicePlugin: CallDelegate {
     if let uuid = call.uuid { provider.reportCall(with: uuid, endedAt: Date(), reason: .failed) }
     activeCall = nil
     emit(type: "failed", state: "failed", message: error.localizedDescription)
+    activeCallSid = nil
   }
 
   public func callDidDisconnect(call: Call, error: Error?) {
@@ -398,6 +407,7 @@ extension SwytchNativeVoicePlugin: CallDelegate {
     muted = false
     onHold = false
     emit(type: "disconnected", state: "disconnected", message: error?.localizedDescription)
+    activeCallSid = nil
   }
 
   public func callDidReceiveQualityWarnings(
