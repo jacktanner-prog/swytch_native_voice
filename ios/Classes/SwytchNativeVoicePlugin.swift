@@ -220,7 +220,7 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
       "muted": muted,
       "onHold": onHold,
     ]
-    if let sid = activeCall?.callSid ?? activeCallSid ?? callInvite?.callSid {
+    if let sid = activeCall?.sid ?? activeCallSid ?? callInvite?.callSid {
       payload["callSid"] = sid
     }
     if let from = callInvite?.from { payload["from"] = from.replacingOccurrences(of: "client:", with: "") }
@@ -374,12 +374,12 @@ extension SwytchNativeVoicePlugin: CXProviderDelegate {
 
 extension SwytchNativeVoicePlugin: CallDelegate {
   public func callDidStartRinging(call: Call) {
-    activeCallSid = call.callSid
+    activeCallSid = call.sid
     emit(type: "ringing", state: "ringing")
   }
 
   public func callDidConnect(call: Call) {
-    activeCallSid = call.callSid
+    activeCallSid = call.sid
     if let uuid = call.uuid { provider.reportOutgoingCall(with: uuid, connectedAt: Date()) }
     emit(type: "connected", state: "connected")
   }
