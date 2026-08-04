@@ -1,6 +1,8 @@
 package com.swytchhub.nativevoice;
 
 import android.content.Intent;
+import android.os.Handler;
+import android.os.Looper;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -15,14 +17,25 @@ import com.twilio.voice.MessageListener;
 import com.twilio.voice.Voice;
 
 import java.lang.reflect.Method;
+import java.util.HashMap;
+import java.util.Map;
 
 public final class SwytchVoiceMessagingService extends FirebaseMessagingService
         implements MessageListener {
 
+    private final Handler voiceHandler = new Handler(Looper.getMainLooper());
+
     @Override
     public void onMessageReceived(@NonNull RemoteMessage remoteMessage) {
         if (!remoteMessage.getData().isEmpty()) {
-            Voice.handleMessage(this, remoteMessage.getData(), this);
+            // Twilio requires register, handleMessage, connect, accept and all
+            // other Voice SDK calls to originate from the same Looper thread.
+            // Firebase invokes this service on a worker thread, while Flutter
+            // plugin calls and Android Service callbacks run on the main Looper.
+            Map<String, String> voicePayload =
+                    new HashMap<>(remoteMessage.getData());
+            voiceHandler.post(() -> Voice.handleMessage(
+                    getApplicationContext(), voicePayload, this));
         }
     }
 
@@ -54,7 +67,9 @@ public final class SwytchVoiceMessagingService extends FirebaseMessagingService
             @Nullable CallException callException) {
         Intent intent = new Intent(this, SwytchVoiceService.class);
         intent.setAction(SwytchVoiceService.ACTION_CANCELLED);
-        intent.putExtra(SwytchVoiceService.EXTRA_CANCELLED_INVITE, cancelledCallInvite);
+        intent.putExtra(
+                SwytchVoiceService.EXTRA_CANCELLED_INVITE,
+                cancelledCallInvite);
         ContextCompat.startForegroundService(this, intent);
     }
 }
