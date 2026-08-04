@@ -1,20 +1,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+    >
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <application>
-        <!-- FlutterFire's service intentionally does not process messages. Replace only
-             that service; its broadcast receiver/background isolate remain untouched. -->
-        <service
-            android:name="io.flutter.plugins.firebase.messaging.FlutterFirebaseMessagingService"
-            tools:node="remove" />
-
         <service
             android:name="com.swytchhub.nativevoice.SwytchVoiceMessagingService"
             android:exported="false"
@@ -27,7 +23,7 @@
         <service
             android:name="com.swytchhub.nativevoice.SwytchVoiceService"
             android:exported="false"
-            android:foregroundServiceType="microphone"
+            android:foregroundServiceType="microphone|phoneCall"
             android:stopWithTask="false" />
     </application>
 </manifest>
