@@ -1,5 +1,6 @@
 package com.swytchhub.nativevoice;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -11,17 +12,20 @@ import android.content.pm.ServiceInfo;
 import android.media.AudioManager;
 import android.os.Build;
 import android.os.IBinder;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.ServiceCompat;
+import androidx.core.content.ContextCompat;
 
 import com.twilio.voice.Call;
 import com.twilio.voice.CallException;
 import com.twilio.voice.CallInvite;
 import com.twilio.voice.CancelledCallInvite;
 import com.twilio.voice.ConnectOptions;
+import com.twilio.voice.DefaultAudioDevice;
 import com.twilio.voice.AcceptOptions;
 import com.twilio.voice.AudioOptions;
 import com.twilio.voice.Voice;
@@ -31,6 +35,7 @@ import java.util.Map;
 import java.util.Set;
 
 public final class SwytchVoiceService extends Service {
+    private static final String TAG = "SwytchVoiceService";
     static final String ACTION_INCOMING = "swytch.voice.INCOMING";
     static final String ACTION_CANCELLED = "swytch.voice.CANCELLED";
     static final String ACTION_CALL = "swytch.voice.CALL";
@@ -72,6 +77,13 @@ public final class SwytchVoiceService extends Service {
     public void onCreate() {
         super.onCreate();
         createChannels();
+        // Some Android vendors expose broken hardware AEC/NS implementations
+        // that crash inside the native WebRTC audio stack. Twilio supports
+        // explicitly selecting its software processing before any call starts.
+        DefaultAudioDevice audioDevice = new DefaultAudioDevice();
+        audioDevice.setUseHardwareAcousticEchoCanceler(false);
+        audioDevice.setUseHardwareNoiseSuppressor(false);
+        Voice.setAudioDevice(audioDevice);
     }
 
     @Nullable
@@ -84,6 +96,20 @@ public final class SwytchVoiceService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null || intent.getAction() == null) return START_NOT_STICKY;
 
+        try {
+            handleAction(intent);
+        } catch (RuntimeException exception) {
+            Log.e(TAG, "Native voice action failed: " + intent.getAction(), exception);
+            activeCall = null;
+            pendingInvite = null;
+            updateState("failed", "failed",
+                    exception.getMessage() == null ? "Android could not start the call" : exception.getMessage());
+            stopVoiceService();
+        }
+        return START_NOT_STICKY;
+    }
+
+    private void handleAction(Intent intent) {
         switch (intent.getAction()) {
             case ACTION_INCOMING: {
                 CallInvite incomingInvite = intent.getParcelableExtra(EXTRA_CALL_INVITE);
@@ -107,6 +133,9 @@ public final class SwytchVoiceService extends Service {
                 break;
             }
             case ACTION_CANCELLED:
+                // A cancellation can wake a stopped app. Satisfy Android's
+                // foreground-service deadline before processing it.
+                startForegroundCompat(buildActiveNotification("Updating incoming call"), false);
                 CancelledCallInvite cancelled = intent.getParcelableExtra(EXTRA_CANCELLED_INVITE);
                 if (cancelled != null && pendingInvite != null
                         && cancelled.getCallSid().equals(pendingInvite.getCallSid())) {
@@ -120,6 +149,9 @@ public final class SwytchVoiceService extends Service {
                 }
                 break;
             case ACTION_CALL:
+                // startForegroundService() must be promoted immediately on
+                // Android O+, before Twilio initializes its media stack.
+                startForegroundCompat(buildActiveNotification("Preparing call"), false);
                 connect(
                         intent.getStringExtra(EXTRA_ACCESS_TOKEN),
                         intent.getStringExtra(EXTRA_TO),
@@ -153,13 +185,17 @@ public final class SwytchVoiceService extends Service {
             default:
                 break;
         }
-        return START_NOT_STICKY;
     }
 
     @SuppressWarnings("unchecked")
     private void connect(String accessToken, String to, Object rawParameters) {
         if (accessToken == null || accessToken.isEmpty() || to == null || to.isEmpty()) {
             updateState("failed", "failed", "Access token and destination are required");
+            return;
+        }
+        if (!hasMicrophonePermission()) {
+            updateState("failed", "failed", "Microphone permission is required to place a call");
+            stopVoiceService();
             return;
         }
         lastTo = to;
@@ -177,23 +213,30 @@ public final class SwytchVoiceService extends Service {
                 .params(params)
                 .audioOptions(audioOptions)
                 .build();
-        activeCall = Voice.connect(this, options, callListener);
         updateState("connecting", "connecting", null);
         startForegroundCompat(buildActiveNotification("Calling " + to), true);
+        activeCall = Voice.connect(this, options, callListener);
     }
 
     private void answer() {
         if (pendingInvite == null) return;
+        if (!hasMicrophonePermission()) {
+            pendingInvite.reject(this);
+            pendingInvite = null;
+            updateState("failed", "failed", "Microphone permission is required to answer a call");
+            stopVoiceService();
+            return;
+        }
         AudioOptions audioOptions = new AudioOptions.Builder()
                 .autoGainControl(false)
                 .build();
         AcceptOptions acceptOptions = new AcceptOptions.Builder()
                 .audioOptions(audioOptions)
                 .build();
-        activeCall = pendingInvite.accept(this, acceptOptions, callListener);
-        pendingInvite = null;
         updateState("connecting", "connecting", null);
         startForegroundCompat(buildActiveNotification("Connecting call"), true);
+        activeCall = pendingInvite.accept(this, acceptOptions, callListener);
+        pendingInvite = null;
     }
 
     private void reject() {
@@ -235,8 +278,10 @@ public final class SwytchVoiceService extends Service {
                 .addAction(0, "Decline", decline)
                 .addAction(0, "Answer", answer)
                 .build();
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        manager.notify(NOTIFICATION_ID, notification);
+        // Incoming FCM messages arrive while the application may be fully
+        // backgrounded. Run as a non-microphone foreground service until the
+        // user explicitly answers the call.
+        startForegroundCompat(notification, false);
     }
 
     private Notification buildActiveNotification(String text) {
@@ -268,9 +313,19 @@ public final class SwytchVoiceService extends Service {
     private void startForegroundCompat(Notification notification, boolean microphone) {
         int type = 0;
         if (microphone && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+            type = ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+                    | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Keep an incoming invitation alive without attempting background
+            // microphone access. MANAGE_OWN_CALLS satisfies this type.
+            type = ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL;
         }
         ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type);
+    }
+
+    private boolean hasMicrophonePermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED;
     }
 
     private void createChannels() {
