@@ -2,10 +2,12 @@ package com.swytchhub.nativevoice;
 
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 
 import androidx.annotation.NonNull;
+import androidx.core.content.ContextCompat;
 
 import com.google.firebase.messaging.FirebaseMessaging;
 import com.twilio.voice.RegistrationException;
@@ -87,8 +89,12 @@ public final class SwytchNativeVoicePlugin implements
                 if (parameters != null) {
                     outgoing.putExtra(SwytchVoiceService.EXTRA_PARAMETERS, new HashMap<>(parameters));
                 }
-                context.startService(outgoing);
-                result.success(null);
+                try {
+                    startVoiceService(outgoing);
+                    result.success(null);
+                } catch (RuntimeException exception) {
+                    result.error("service_start_failed", exception.getMessage(), null);
+                }
                 break;
             case "answer":
                 sendAction(SwytchVoiceService.ACTION_ANSWER, null, null);
@@ -209,6 +215,15 @@ public final class SwytchNativeVoicePlugin implements
         intent.setAction(action);
         intent.putExtra(SwytchVoiceService.EXTRA_VALUE, value);
         context.startService(intent);
+    }
+
+    private void startVoiceService(Intent intent) {
+        if (context == null) throw new IllegalStateException("Native voice is not attached");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ContextCompat.startForegroundService(context, intent);
+        } else {
+            context.startService(intent);
+        }
     }
 
     static void emitFromNative(Map<String, Object> event) {
