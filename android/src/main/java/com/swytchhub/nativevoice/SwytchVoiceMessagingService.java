@@ -4,6 +4,7 @@ import android.content.Intent;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.content.ContextCompat;
 
 import com.google.firebase.messaging.FirebaseMessagingService;
 import com.google.firebase.messaging.RemoteMessage;
@@ -44,7 +45,7 @@ public final class SwytchVoiceMessagingService extends FirebaseMessagingService
         Intent intent = new Intent(this, SwytchVoiceService.class);
         intent.setAction(SwytchVoiceService.ACTION_INCOMING);
         intent.putExtra(SwytchVoiceService.EXTRA_CALL_INVITE, callInvite);
-        startService(intent);
+        ContextCompat.startForegroundService(this, intent);
     }
 
     @Override
@@ -54,6 +55,6 @@ public final class SwytchVoiceMessagingService extends FirebaseMessagingService
         Intent intent = new Intent(this, SwytchVoiceService.class);
         intent.setAction(SwytchVoiceService.ACTION_CANCELLED);
         intent.putExtra(SwytchVoiceService.EXTRA_CANCELLED_INVITE, cancelledCallInvite);
-        startService(intent);
+        ContextCompat.startForegroundService(this, intent);
     }
 }
