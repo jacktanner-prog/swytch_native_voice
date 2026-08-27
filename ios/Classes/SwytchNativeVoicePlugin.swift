@@ -224,7 +224,15 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
       payload["callSid"] = sid
     }
     if let from = callInvite?.from { payload["from"] = from.replacingOccurrences(of: "client:", with: "") }
-    if let to = pendingOutgoingTo { payload["to"] = to }
+    if let to = pendingOutgoingTo ?? callInvite?.customParameters?["CalledNumber"] {
+      payload["to"] = to
+    }
+    if let callerName = callInvite?.customParameters?["CallerName"], !callerName.isEmpty {
+      payload["callerName"] = callerName
+    }
+    if let lineName = callInvite?.customParameters?["CalledLineName"], !lineName.isEmpty {
+      payload["lineName"] = lineName
+    }
     return payload
   }
 }
@@ -290,8 +298,16 @@ extension SwytchNativeVoicePlugin: NotificationDelegate {
     UserDefaults.standard.set(Date(), forKey: Self.bindingDateKey)
 
     let from = (callInvite.from ?? "Swytch caller").replacingOccurrences(of: "client:", with: "")
+    let callerName = callInvite.customParameters?["CallerName"] ?? ""
+    let calledNumber = callInvite.customParameters?["CalledNumber"] ?? ""
+    let lineName = callInvite.customParameters?["CalledLineName"] ?? ""
     let update = CXCallUpdate()
     update.remoteHandle = CXHandle(type: .generic, value: from)
+    let callerLabel = callerName.isEmpty ? from : callerName
+    let lineLabel = lineName.isEmpty ? calledNumber : lineName
+    update.localizedCallerName = lineLabel.isEmpty
+      ? callerLabel
+      : "\(callerLabel) • to \(lineLabel)"
     update.supportsDTMF = true
     update.supportsHolding = true
     update.hasVideo = false
