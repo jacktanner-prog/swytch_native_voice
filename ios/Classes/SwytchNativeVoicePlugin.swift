@@ -20,6 +20,9 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
   private var callInvite: CallInvite?
   private var activeCall: Call?
   private var activeCallSid: String?
+  private var activeCallUUID: UUID?
+  private var isOutgoingCall = false
+  private var speakerEnabled = false
   private var pendingOutgoingToken: String?
   private var pendingOutgoingTo: String?
   private var pendingOutgoingParameters: [String: String] = [:]
@@ -36,6 +39,7 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
     super.init()
 
     provider.setDelegate(self, queue: .main)
+    audioDevice.isEnabled = false
     TwilioVoiceSDK.audioDevice = audioDevice
     pushRegistry.delegate = self
     pushRegistry.desiredPushTypes = [.voIP]
@@ -103,6 +107,10 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
         result(FlutterError(code: "invalid_call", message: "Access token and destination are required", details: nil))
         return
       }
+      guard activeCall == nil, callInvite == nil, activeCallUUID == nil else {
+        result(FlutterError(code: "call_busy", message: "End the current call before starting another.", details: nil))
+        return
+      }
       pendingOutgoingToken = token
       pendingOutgoingTo = to
       pendingOutgoingParameters = arguments?["parameters"] as? [String: String] ?? [:]
@@ -117,8 +125,7 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
       guard let invite = callInvite else { result(nil); return }
       requestTransaction(CXEndCallAction(call: invite.uuid), result: result)
     case "hangup":
-      guard let uuid = activeCall?.uuid else { result(nil); return }
-      requestTransaction(CXEndCallAction(call: uuid), result: result)
+      endCurrentCall(result: result)
     case "setMuted":
       guard let uuid = activeCall?.uuid, let value = arguments?["value"] as? Bool else {
         result(nil); return
@@ -131,15 +138,15 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
       requestTransaction(CXSetHeldCallAction(call: uuid, onHold: value), result: result)
     case "setSpeaker":
       guard let value = arguments?["value"] as? Bool else { result(nil); return }
-      audioDevice.block = {
-        do {
-          try AVAudioSession.sharedInstance().overrideOutputAudioPort(value ? .speaker : .none)
-          result(nil)
-        } catch {
-          result(FlutterError(code: "audio_route_failed", message: error.localizedDescription, details: nil))
-        }
+      // Do not replace DefaultAudioDevice's configuration callback. It is
+      // needed to prepare the next call, and must never retain FlutterResult.
+      do {
+        try AVAudioSession.sharedInstance().overrideOutputAudioPort(value ? .speaker : .none)
+        speakerEnabled = value
+        result(nil)
+      } catch {
+        result(FlutterError(code: "audio_route_failed", message: error.localizedDescription, details: nil))
       }
-      audioDevice.block()
     case "sendDigits":
       if let digits = arguments?["digits"] as? String { activeCall?.sendDigits(digits) }
       result(nil)
@@ -158,12 +165,12 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
     }
     TwilioVoiceSDK.register(accessToken: token, deviceToken: pushToken) { error in
       if let error = error {
-        self.emit(type: "registrationFailed", state: "idle", message: error.localizedDescription)
+        self.emitState(type: "registrationFailed", message: error.localizedDescription)
         result(FlutterError(code: "registration_failed", message: error.localizedDescription, details: nil))
       } else {
         UserDefaults.standard.set(pushToken, forKey: Self.tokenKey)
         UserDefaults.standard.set(Date(), forKey: Self.bindingDateKey)
-        self.emit(type: "registered", state: "idle")
+        self.emitState(type: "registered")
         result(nil)
       }
     }
@@ -171,11 +178,16 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
 
   private func requestStartCall(to: String, result: @escaping FlutterResult) {
     let uuid = UUID()
+    activeCallUUID = uuid
+    isOutgoingCall = true
     let handle = CXHandle(type: .phoneNumber, value: to)
     let action = CXStartCallAction(call: uuid, handle: handle)
     callController.request(CXTransaction(action: action)) { error in
       DispatchQueue.main.async {
         if let error = error {
+          self.activeCallUUID = nil
+          self.pendingOutgoingToken = nil
+          self.pendingOutgoingTo = nil
           result(FlutterError(code: "callkit_failed", message: error.localizedDescription, details: nil))
         } else {
           let update = CXCallUpdate()
@@ -188,6 +200,52 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
         }
       }
     }
+  }
+
+  private func endCurrentCall(result: @escaping FlutterResult) {
+    guard let uuid = activeCall?.uuid ?? callInvite?.uuid ?? activeCallUUID else {
+      // Recover stale UI while still disconnecting a call lacking a CallKit UUID.
+      if let call = activeCall { call.disconnect() }
+      else { emit(type: "disconnected", state: "disconnected") }
+      result(nil)
+      return
+    }
+    callController.request(CXTransaction(action: CXEndCallAction(call: uuid))) { error in
+      DispatchQueue.main.async {
+        if error != nil {
+          // CallKit can lose its transaction while Twilio still owns the call.
+          self.disconnectCall(uuid: uuid)
+        }
+        result(nil)
+      }
+    }
+  }
+
+  private func disconnectCall(uuid: UUID) {
+    if let invite = callInvite, invite.uuid == uuid {
+      invite.reject()
+      callInvite = nil
+      activeCallUUID = nil
+      activeCallSid = nil
+      provider.reportCall(with: uuid, endedAt: Date(), reason: .remoteEnded)
+      emit(type: "disconnected", state: "disconnected")
+    } else if let call = activeCall, call.uuid == uuid || activeCallUUID == uuid {
+      call.disconnect()
+      provider.reportCall(with: uuid, endedAt: Date(), reason: .remoteEnded)
+    } else if activeCallUUID == uuid {
+      activeCallUUID = nil
+      pendingOutgoingToken = nil
+      pendingOutgoingTo = nil
+      provider.reportCall(with: uuid, endedAt: Date(), reason: .remoteEnded)
+      emit(type: "disconnected", state: "disconnected")
+    }
+  }
+
+  private func prepareCallAudio() {
+    // CallKit activates audio after the start/answer transaction is fulfilled.
+    audioDevice.isEnabled = false
+    speakerEnabled = false
+    audioDevice.block()
   }
 
   private func requestTransaction(_ action: CXAction, result: @escaping FlutterResult) {
@@ -247,11 +305,11 @@ extension SwytchNativeVoicePlugin: PKPushRegistryDelegate {
     guard let token = accessToken else { return }
     TwilioVoiceSDK.register(accessToken: token, deviceToken: pushCredentials.token) { error in
       if let error = error {
-        self.emit(type: "registrationFailed", state: "idle", message: error.localizedDescription)
+        self.emitState(type: "registrationFailed", message: error.localizedDescription)
       } else {
         UserDefaults.standard.set(pushCredentials.token, forKey: Self.tokenKey)
         UserDefaults.standard.set(Date(), forKey: Self.bindingDateKey)
-        self.emit(type: "registered", state: "idle")
+        self.emitState(type: "registered")
       }
     }
   }
@@ -294,6 +352,8 @@ extension SwytchNativeVoicePlugin: NotificationDelegate {
       return
     }
     self.callInvite = callInvite
+    activeCallUUID = callInvite.uuid
+    isOutgoingCall = false
     activeCallSid = callInvite.callSid
     UserDefaults.standard.set(Date(), forKey: Self.bindingDateKey)
 
@@ -315,6 +375,8 @@ extension SwytchNativeVoicePlugin: NotificationDelegate {
       if let error = error {
         callInvite.reject()
         self.callInvite = nil
+        self.activeCallUUID = nil
+        self.activeCallSid = nil
         self.emit(type: "failed", state: "failed", message: error.localizedDescription)
       } else {
         self.emit(type: "incoming", state: "incoming")
@@ -326,6 +388,8 @@ extension SwytchNativeVoicePlugin: NotificationDelegate {
     guard let invite = callInvite, invite.callSid == cancelledCallInvite.callSid else { return }
     provider.reportCall(with: invite.uuid, endedAt: Date(), reason: .remoteEnded)
     callInvite = nil
+    activeCallUUID = nil
+    activeCallSid = nil
     emit(type: "cancelled", state: "disconnected", message: error.localizedDescription)
   }
 }
@@ -333,14 +397,22 @@ extension SwytchNativeVoicePlugin: NotificationDelegate {
 extension SwytchNativeVoicePlugin: CXProviderDelegate {
   public func providerDidReset(_ provider: CXProvider) {
     audioDevice.isEnabled = false
+    callInvite?.reject()
+    activeCall?.disconnect()
     callInvite = nil
     activeCall = nil
+    activeCallUUID = nil
+    pendingOutgoingToken = nil
+    pendingOutgoingTo = nil
     activeCallSid = nil
     emit(type: "reset", state: "idle")
   }
 
   public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
     audioDevice.isEnabled = true
+    if speakerEnabled {
+      try? audioSession.overrideOutputAudioPort(.speaker)
+    }
   }
 
   public func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
@@ -351,6 +423,9 @@ extension SwytchNativeVoicePlugin: CXProviderDelegate {
     guard let token = pendingOutgoingToken, let to = pendingOutgoingTo else {
       action.fail(); return
     }
+    activeCallUUID = action.callUUID
+    isOutgoingCall = true
+    prepareCallAudio()
     provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: Date())
     let options = ConnectOptions(accessToken: token) { builder in
       var parameters = self.pendingOutgoingParameters
@@ -366,6 +441,9 @@ extension SwytchNativeVoicePlugin: CXProviderDelegate {
   public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
     guard let invite = callInvite else { action.fail(); return }
     activeCallSid = invite.callSid
+    activeCallUUID = invite.uuid
+    isOutgoingCall = false
+    prepareCallAudio()
     let options = AcceptOptions(callInvite: invite) { builder in builder.uuid = invite.uuid }
     activeCall = invite.accept(options: options, delegate: self)
     callInvite = nil
@@ -374,12 +452,7 @@ extension SwytchNativeVoicePlugin: CXProviderDelegate {
   }
 
   public func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
-    if let invite = callInvite, invite.uuid == action.callUUID {
-      invite.reject()
-      callInvite = nil
-    } else if let call = activeCall, call.uuid == action.callUUID {
-      call.disconnect()
-    }
+    disconnectCall(uuid: action.callUUID)
     action.fulfill()
   }
 
@@ -414,7 +487,9 @@ extension SwytchNativeVoicePlugin: CallDelegate {
 
   public func callDidConnect(call: Call) {
     activeCallSid = call.sid
-    if let uuid = call.uuid { provider.reportOutgoingCall(with: uuid, connectedAt: Date()) }
+    if isOutgoingCall, let uuid = call.uuid {
+      provider.reportOutgoingCall(with: uuid, connectedAt: Date())
+    }
     emit(type: "connected", state: "connected")
   }
 
@@ -427,17 +502,26 @@ extension SwytchNativeVoicePlugin: CallDelegate {
   }
 
   public func callDidFailToConnect(call: Call, error: Error) {
+    guard activeCall === call else { return }
     if let uuid = call.uuid { provider.reportCall(with: uuid, endedAt: Date(), reason: .failed) }
     activeCall = nil
+    activeCallUUID = nil
+    pendingOutgoingToken = nil
+    pendingOutgoingTo = nil
     emit(type: "failed", state: "failed", message: error.localizedDescription)
     activeCallSid = nil
   }
 
   public func callDidDisconnect(call: Call, error: Error?) {
+    guard activeCall === call else { return }
     if let uuid = call.uuid {
       provider.reportCall(with: uuid, endedAt: Date(), reason: error == nil ? .remoteEnded : .failed)
     }
     activeCall = nil
+    activeCallUUID = nil
+    pendingOutgoingToken = nil
+    pendingOutgoingTo = nil
+    speakerEnabled = false
     muted = false
     onHold = false
     emit(type: "disconnected", state: "disconnected", message: error?.localizedDescription)
