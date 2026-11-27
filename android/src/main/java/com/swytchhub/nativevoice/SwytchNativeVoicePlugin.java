@@ -130,6 +130,18 @@ public final class SwytchNativeVoicePlugin implements
             case "currentState":
                 result.success(SwytchVoiceService.snapshot());
                 break;
+            case "audioRoutes":
+            case "selectAudioRoute":
+                try {
+                    result.success("audioRoutes".equals(call.method)
+                            ? SwytchAudioRoutes.snapshot(context)
+                            : SwytchAudioRoutes.select(context,call.argument("id"),call.argument("callSid")));
+                } catch (SecurityException exception) {
+                    result.error("bluetooth_permission_required", "Allow Nearby devices/Bluetooth access in Android app settings, then refresh outputs.", null);
+                } catch (RuntimeException exception) {
+                    result.error("audio_route_failed", exception.getMessage(), null);
+                }
+                break;
             default:
                 result.notImplemented();
         }

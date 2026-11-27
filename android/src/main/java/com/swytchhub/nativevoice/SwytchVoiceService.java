@@ -93,6 +93,12 @@ public final class SwytchVoiceService extends Service {
     }
 
     @Override
+    public void onDestroy() {
+        SwytchAudioRoutes.clearOwnedSelection(this);
+        super.onDestroy();
+    }
+
+    @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null || intent.getAction() == null) return START_NOT_STICKY;
 
@@ -342,6 +348,7 @@ public final class SwytchVoiceService extends Service {
     }
 
     private void stopVoiceService() {
+        SwytchAudioRoutes.clearOwnedSelection(this);
         NotificationManager manager = getSystemService(NotificationManager.class);
         manager.cancel(NOTIFICATION_ID);
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE);
