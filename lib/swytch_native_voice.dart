@@ -99,6 +99,21 @@ class SwytchNativeVoice {
       _methods.invokeMethod<void>('setHold', {'value': value});
   static Future<void> setSpeaker(bool value) =>
       _methods.invokeMethod<void>('setSpeaker', {'value': value});
+
+  /// Reads only the outputs currently available to the active native call.
+  static Future<Map<String, dynamic>> audioRoutes() async =>
+      await _methods.invokeMapMethod<String, dynamic>('audioRoutes') ?? {};
+
+  /// Revalidates the selected route natively; a disconnected route is an error.
+  static Future<Map<String, dynamic>> selectAudioRoute(
+    String id, {
+    required String callSid,
+  }) async =>
+      await _methods.invokeMapMethod<String, dynamic>('selectAudioRoute', {
+        'id': id,
+        'callSid': callSid,
+      }) ??
+      {};
   static Future<void> sendDigits(String digits) =>
       _methods.invokeMethod<void>('sendDigits', {'digits': digits});
 
