@@ -23,6 +23,7 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
   private var activeCallUUID: UUID?
   private var isOutgoingCall = false
   private var speakerEnabled = false
+  private var ownsAudioRoute = false
   private var pendingOutgoingToken: String?
   private var pendingOutgoingTo: String?
   private var pendingOutgoingParameters: [String: String] = [:]
@@ -152,6 +153,43 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
       result(nil)
     case "currentState":
       result(statePayload())
+    case "audioRoutes":
+      result(audioRoutes())
+    case "selectAudioRoute":
+      guard activeCall != nil, audioDevice.isEnabled else {
+        result(FlutterError(code: "audio_route_failed", message: "Connect a call before choosing its audio output.", details: nil))
+        return
+      }
+      guard let expectedSid = arguments?["callSid"] as? String, !expectedSid.isEmpty, expectedSid == activeCall?.sid else {
+        result(FlutterError(code: "audio_route_failed", message: "This call changed. Close and reopen audio outputs.", details: nil))
+        return
+      }
+      guard let id = arguments?["id"] as? String else {
+        result(FlutterError(code: "audio_route_failed", message: "Choose an available audio output.", details: nil))
+        return
+      }
+      do {
+        let session = AVAudioSession.sharedInstance()
+        if id == "speaker" {
+          try session.overrideOutputAudioPort(.speaker)
+          speakerEnabled = true
+        } else {
+          let inputs = session.availableInputs ?? []
+          let target = id == "handset" ? inputs.first(where: { $0.portType == .builtInMic }) : inputs.first(where: { "input:" + $0.uid == id })
+          guard let target = target, id != "handset" || UIDevice.current.userInterfaceIdiom == .phone else {
+            result(FlutterError(code: "audio_route_failed", message: "That audio output disconnected. Refresh the list.", details: nil))
+            return
+          }
+          try session.overrideOutputAudioPort(.none)
+          try session.setPreferredInput(target)
+          speakerEnabled = false
+        }
+        // Report the actual OS route, not merely the requested selection.
+        ownsAudioRoute = true
+        result(audioRoutes())
+      } catch {
+        result(FlutterError(code: "audio_route_failed", message: error.localizedDescription, details: nil))
+      }
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -242,10 +280,35 @@ public final class SwytchNativeVoicePlugin: NSObject, FlutterPlugin, FlutterStre
   }
 
   private func prepareCallAudio() {
+    clearOwnedAudioRoute()
     // CallKit activates audio after the start/answer transaction is fulfilled.
     audioDevice.isEnabled = false
     speakerEnabled = false
     audioDevice.block()
+  }
+
+  private func clearOwnedAudioRoute() {
+    guard ownsAudioRoute else { return }
+    ownsAudioRoute = false
+    try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.none)
+    try? AVAudioSession.sharedInstance().setPreferredInput(nil)
+  }
+
+  private func audioRoutes() -> [String: Any] {
+    let session = AVAudioSession.sharedInstance()
+    let inputs = session.availableInputs ?? []
+    let outputs = session.currentRoute.outputs
+    let currentInputs = session.currentRoute.inputs
+    let speaker = outputs.contains(where: { $0.portType == .builtInSpeaker })
+    var routes: [[String: Any]] = [["id": "speaker", "name": "Speaker", "kind": "speaker", "selected": speaker]]
+    if UIDevice.current.userInterfaceIdiom == .phone, inputs.contains(where: { $0.portType == .builtInMic }) {
+      routes.append(["id": "handset", "name": "Handset", "kind": "handset", "selected": outputs.contains(where: { $0.portType == .builtInReceiver })])
+    }
+    for input in inputs where input.portType != .builtInMic {
+      let bluetooth = input.portType == .bluetoothHFP || input.portType == .bluetoothLE
+      routes.append(["id": "input:" + input.uid, "name": input.portName, "kind": bluetooth ? "bluetooth" : "headset", "selected": !speaker && currentInputs.contains(where: { $0.uid == input.uid })])
+    }
+    return ["active": activeCall != nil && audioDevice.isEnabled, "routes": routes, "explicitDeviceSelection": true]
   }
 
   private func requestTransaction(_ action: CXAction, result: @escaping FlutterResult) {
@@ -396,6 +459,7 @@ extension SwytchNativeVoicePlugin: NotificationDelegate {
 
 extension SwytchNativeVoicePlugin: CXProviderDelegate {
   public func providerDidReset(_ provider: CXProvider) {
+    clearOwnedAudioRoute()
     audioDevice.isEnabled = false
     callInvite?.reject()
     activeCall?.disconnect()
@@ -514,6 +578,7 @@ extension SwytchNativeVoicePlugin: CallDelegate {
 
   public func callDidDisconnect(call: Call, error: Error?) {
     guard activeCall === call else { return }
+    clearOwnedAudioRoute()
     if let uuid = call.uuid {
       provider.reportCall(with: uuid, endedAt: Date(), reason: error == nil ? .remoteEnded : .failed)
     }
